@@ -14,9 +14,6 @@ logs/*.log
 reports/*
 !reports/.gitkeep
 
-# Temporary large files ignore
-*.pptx
-
 # IDE / OS
 .vscode/
 .idea/
