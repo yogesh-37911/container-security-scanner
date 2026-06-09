@@ -16,7 +16,6 @@ reports/*
 
 # Temporary large files ignore
 *.pptx
-*.docx
 
 # IDE / OS
 .vscode/
