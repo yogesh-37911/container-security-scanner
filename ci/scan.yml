@@ -1,0 +1,120 @@
+name: Container Security Scan
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Docker image to scan"
+        required: true
+        default: "nginx:latest"
+
+jobs:
+  security-scan:
+    name: 🛡️ Container Threat Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Start Docker daemon
+        run: |
+          sudo systemctl start docker
+          docker info
+
+      - name: Pull target image
+        run: |
+          IMAGE="${{ github.event.inputs.image || 'nginx:latest' }}"
+          docker pull "$IMAGE"
+
+      - name: Run Container Security Scan
+        id: scan
+        run: |
+          IMAGE="${{ github.event.inputs.image || 'nginx:latest' }}"
+          python main.py "$IMAGE" --output reports/ --json > reports/scan_output.json
+          echo "scan_complete=true" >> $GITHUB_OUTPUT
+
+      - name: Parse risk score
+        id: risk
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+
+          try:
+              with open("reports/scan_output.json", encoding="utf-8") as f:
+                  data = json.load(f)
+              risk = data.get("risk_score", {})
+              print(f"SCORE={risk.get('score', 0)}")
+              print(f"GRADE={risk.get('grade', 'U')}")
+          except Exception:
+              print("SCORE=0")
+              print("GRADE=U")
+          PY
+
+      - name: Upload scan reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-reports
+          path: reports/
+          retention-days: 30
+
+      - name: Post scan summary to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            let body = '## 🛡️ Container Security Scan Results\n\n';
+            try {
+              const output = fs.readFileSync('reports/scan_output.json', 'utf8');
+              const data = JSON.parse(output);
+              const risk = data.risk_score || {};
+              const vuln = data.vuln_data?.summary || {};
+              body += `**Image:** \`${{ github.event.inputs.image || 'nginx:latest' }}\`\n\n`;
+              body += `| Metric | Value |\n|--------|-------|\n`;
+              body += `| Risk Score | ${risk.score || 'N/A'} / 10 |\n`;
+              body += `| Grade | ${risk.grade || 'N/A'} |\n`;
+              body += `| Critical CVEs | ${vuln.CRITICAL || 0} |\n`;
+              body += `| High CVEs | ${vuln.HIGH || 0} |\n`;
+              body += `| Medium CVEs | ${vuln.MEDIUM || 0} |\n`;
+            } catch(e) {
+              body += '_Scan results not available._';
+            }
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+      - name: Fail on Critical vulnerabilities
+        run: |
+          python -c "
+          import json, sys
+          try:
+            with open('reports/scan_output.json') as f:
+              data = json.load(f)
+            critical = data.get('vuln_data', {}).get('summary', {}).get('CRITICAL', 0)
+            score = data.get('risk_score', {}).get('score', 0)
+            if critical > 0:
+              print(f'FAIL: {critical} CRITICAL CVEs found. Score: {score}/10')
+              sys.exit(1)
+            else:
+              print(f'PASS: No critical CVEs. Score: {score}/10')
+          except Exception as e:
+            print(f'Warning: Could not parse results: {e}')
+          "
